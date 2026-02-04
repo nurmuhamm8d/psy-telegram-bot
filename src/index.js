@@ -21,6 +21,11 @@ const { exportSessionXlsx } = require("./excel");
 
 const isOperator = (id) => OPERATOR_IDS.includes(Number(id));
 
+const toInt = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+};
+
 const safeUserLabel = (u, clientId) => {
   const uname = u?.username ? `@${u.username}` : "";
   const fn = u?.first_name || "";
@@ -80,69 +85,73 @@ const detectMsgType = (m) => {
   return { type: "unknown", text: "[unknown]" };
 };
 
-const nowMs = () => Date.now();
-
-const topicCache = new Map();
+const TOPIC_CACHE = new Map();
 const TOPIC_CACHE_TTL_MS = 10 * 60 * 1000;
 
-const toInt = (v) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : NaN;
-};
+const nowMs = () => Date.now();
 
-const isGeneralThread = (threadId) => toInt(threadId) === 1;
+const makeTopicTitle = (clientId) => `client_${Number(clientId)}`;
 
-const tryDelete = async (chat_id, message_id) => {
+const safeDelete = async (message_id) => {
   try {
-    if (!chat_id || !message_id) return;
-    await tg.deleteMessage({ chat_id, message_id });
+    if (!message_id) return;
+    await tg.deleteMessage({ chat_id: ADMIN_GROUP_ID, message_id });
   } catch {}
 };
 
-const sendToTopicChecked = async (threadId, text, extra) => {
+const sendToThreadStrict = async (threadId, text, extra) => {
   const tid = toInt(threadId);
+  if (!Number.isFinite(tid) || tid <= 0) throw new Error("Invalid threadId");
+
   const res = await tg.sendMessage({
     chat_id: ADMIN_GROUP_ID,
     message_thread_id: tid,
     text,
-    ...(extra || {}),
+    reply_markup: extra?.reply_markup,
+    disable_notification: extra?.disable_notification,
   });
 
   const got = toInt(res?.message_thread_id);
   if (got !== tid) {
-    await tryDelete(ADMIN_GROUP_ID, res?.message_id);
-    const gotStr = Number.isFinite(got) ? String(got) : "none";
-    throw new Error(
-      `Topic routing failed. want=${tid} got=${gotStr} (likely fallback to General)`,
-    );
+    await safeDelete(res?.message_id);
+    throw new Error(`Misrouted message want=${tid} got=${String(got)}`);
   }
 
   return res;
 };
 
-const probeThreadRouting = async (threadId) => {
+const sendDocumentToThreadStrict = async (threadId, filePath, filename) => {
   const tid = toInt(threadId);
-  if (!Number.isFinite(tid) || tid <= 1) return false;
+  if (!Number.isFinite(tid) || tid <= 0) throw new Error("Invalid threadId");
 
-  let msg = null;
-  try {
-    msg = await tg.sendMessage({
-      chat_id: ADMIN_GROUP_ID,
-      message_thread_id: tid,
-      text: "·",
-      disable_notification: true,
-    });
-  } catch {
-    return false;
-  } finally {
-    if (msg?.message_id) await tryDelete(ADMIN_GROUP_ID, msg.message_id);
+  const res = await tg.sendDocument({
+    chat_id: ADMIN_GROUP_ID,
+    message_thread_id: tid,
+    filePath,
+    filename,
+    disable_notification: true,
+  });
+
+  const got = toInt(res?.message_thread_id);
+  if (got !== tid) {
+    await safeDelete(res?.message_id);
+    throw new Error(`Misrouted document want=${tid} got=${String(got)}`);
   }
 
-  const got = toInt(msg?.message_thread_id);
-  return got === tid;
+  return res;
 };
 
-const makeTopicTitle = (clientId) => `client_${Number(clientId)}`;
+const probeThread = async (threadId) => {
+  try {
+    const res = await sendToThreadStrict(threadId, "·", {
+      disable_notification: true,
+    });
+    await safeDelete(res?.message_id);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const recreateClientTopic = async (clientId, user) => {
   const title = makeTopicTitle(clientId);
@@ -153,17 +162,17 @@ const recreateClientTopic = async (clientId, user) => {
   });
 
   const threadId = toInt(created?.message_thread_id);
-  if (!Number.isFinite(threadId) || threadId <= 1)
+  if (!Number.isFinite(threadId) || threadId <= 0)
     throw new Error("createForumTopic returned invalid message_thread_id");
 
   await db.setClientTopic(clientId, threadId, title);
 
-  topicCache.set(Number(clientId), {
+  TOPIC_CACHE.set(Number(clientId), {
     threadId,
     okUntilMs: nowMs() + TOPIC_CACHE_TTL_MS,
   });
 
-  await sendToTopicChecked(
+  await sendToThreadStrict(
     threadId,
     `🆕 Жаңа клиент: ${safeUserLabel(user, clientId)}`,
   );
@@ -175,27 +184,16 @@ const ensureClientTopic = async (clientId, user) => {
   await db.openIndex();
 
   const cid = Number(clientId);
-  const cached = topicCache.get(cid);
-  if (
-    cached &&
-    Number.isFinite(cached.threadId) &&
-    cached.okUntilMs > nowMs() &&
-    !isGeneralThread(cached.threadId)
-  ) {
-    return cached.threadId;
-  }
+  const cached = TOPIC_CACHE.get(cid);
+  if (cached && cached.okUntilMs > nowMs()) return cached.threadId;
 
   const current = await db.getClientTopic(cid);
   const currentTid = toInt(current?.threadId);
 
-  if (
-    Number.isFinite(currentTid) &&
-    currentTid > 1 &&
-    !isGeneralThread(currentTid)
-  ) {
-    const ok = await probeThreadRouting(currentTid);
+  if (Number.isFinite(currentTid) && currentTid > 0) {
+    const ok = await probeThread(currentTid);
     if (ok) {
-      topicCache.set(cid, {
+      TOPIC_CACHE.set(cid, {
         threadId: currentTid,
         okUntilMs: nowMs() + TOPIC_CACHE_TTL_MS,
       });
@@ -210,6 +208,35 @@ const ensureClientTopic = async (clientId, user) => {
   return recreateClientTopic(cid, user);
 };
 
+const sendToClientTopic = async (clientId, user, text, extra) => {
+  const tid = await ensureClientTopic(clientId, user);
+  try {
+    return await sendToThreadStrict(tid, text, extra);
+  } catch {
+    const tid2 = await recreateClientTopic(clientId, user);
+    return await sendToThreadStrict(tid2, text, extra);
+  }
+};
+
+const sendSurveyExcelToClientTopic = async (
+  clientId,
+  user,
+  threadId,
+  sessionId,
+) => {
+  if (!SEND_EXCEL_TO_TELEGRAM) return;
+
+  const filePath = await exportSessionXlsx(clientId, sessionId, "survey");
+  const filename = `survey_${clientId}_${sessionId}.xlsx`;
+
+  try {
+    await sendDocumentToThreadStrict(threadId, filePath, filename);
+  } catch {
+    const tid2 = await recreateClientTopic(clientId, user);
+    await sendDocumentToThreadStrict(tid2, filePath, filename);
+  }
+};
+
 const sendBotToClient = async (
   clientId,
   sessionId,
@@ -222,7 +249,7 @@ const sendBotToClient = async (
   const sent = await tg.sendMessage({
     chat_id: clientId,
     text,
-    ...(extra || {}),
+    reply_markup: extra?.reply_markup,
   });
 
   await db.logMessage(clientId, sessionId, {
@@ -237,7 +264,7 @@ const sendBotToClient = async (
   });
 
   if (mirrorToTopic) {
-    await sendToTopicChecked(threadId, `❓ ${text}`);
+    await sendToClientTopic(clientId, { id: clientId }, `❓ ${text}`);
   }
 
   return sent;
@@ -249,6 +276,7 @@ const sendSurveyQuestionWithOptions = async (
   threadId,
   questionText,
   optionsList,
+  user,
 ) => {
   const topicText = [
     "🧾 ОПРОС",
@@ -257,12 +285,12 @@ const sendSurveyQuestionWithOptions = async (
     ...optionsList.map((x) => `• ${x}`),
   ].join("\n");
 
-  const topicMsg = await sendToTopicChecked(threadId, topicText);
+  const topicMsg = await sendToClientTopic(clientId, user, topicText);
 
   const sent = await tg.sendMessage({
     chat_id: clientId,
     text: questionText,
-    ...replyKeyboard2Col(optionsList),
+    reply_markup: replyKeyboard2Col(optionsList).reply_markup,
   });
 
   await db.logMessage(clientId, sessionId, {
@@ -292,8 +320,14 @@ const logSurveyAnswer = async (
   threadId,
   question,
   answer,
+  user,
 ) => {
-  await sendToTopicChecked(threadId, `✅ Жауап\n❓ ${question}\n👤 ${answer}`);
+  await sendToClientTopic(
+    clientId,
+    user,
+    `✅ Жауап\n❓ ${question}\n👤 ${answer}`,
+  );
+
   await db.logMessage(clientId, sessionId, {
     role: "client",
     direction: "in",
@@ -316,8 +350,9 @@ const forwardClientMessageToTopic = async (
   const label = safeUserLabel(user, clientId);
 
   if (t.type === "text") {
-    const topicMsg = await sendToTopicChecked(
-      threadId,
+    const topicMsg = await sendToClientTopic(
+      clientId,
+      user,
       `👤 ${label}\n${t.text}`,
     );
     await db.logMessage(clientId, sessionId, {
@@ -339,22 +374,38 @@ const forwardClientMessageToTopic = async (
     return;
   }
 
-  await sendToTopicChecked(threadId, `👤 ${label}\n${t.text}`);
+  const tid = await ensureClientTopic(clientId, user);
 
-  const forwarded = await tg.forwardMessage({
-    chat_id: ADMIN_GROUP_ID,
-    from_chat_id: clientId,
-    message_id: m.message_id,
-    message_thread_id: threadId,
-    disable_notification: true,
-  });
+  let forwarded = null;
+  try {
+    forwarded = await tg.forwardMessage({
+      chat_id: ADMIN_GROUP_ID,
+      from_chat_id: clientId,
+      message_id: m.message_id,
+      message_thread_id: tid,
+      disable_notification: true,
+    });
 
-  const got = toInt(forwarded?.message_thread_id);
-  if (got !== toInt(threadId)) {
-    await tryDelete(ADMIN_GROUP_ID, forwarded?.message_id);
-    throw new Error(
-      `Forward routing failed. want=${threadId} got=${Number.isFinite(got) ? got : "none"}`,
-    );
+    const got = toInt(forwarded?.message_thread_id);
+    if (got !== toInt(tid)) {
+      await safeDelete(forwarded?.message_id);
+      throw new Error("misroute");
+    }
+  } catch {
+    const tid2 = await recreateClientTopic(clientId, user);
+    forwarded = await tg.forwardMessage({
+      chat_id: ADMIN_GROUP_ID,
+      from_chat_id: clientId,
+      message_id: m.message_id,
+      message_thread_id: tid2,
+      disable_notification: true,
+    });
+
+    const got2 = toInt(forwarded?.message_thread_id);
+    if (got2 !== toInt(tid2)) {
+      await safeDelete(forwarded?.message_id);
+      throw new Error("Forward misrouted twice");
+    }
   }
 
   await db.logMessage(clientId, sessionId, {
@@ -368,7 +419,7 @@ const forwardClientMessageToTopic = async (
     payload: {
       mirror: {
         chat_id: ADMIN_GROUP_ID,
-        thread_id: threadId,
+        thread_id: tid,
         message_id: forwarded?.message_id || null,
       },
     },
@@ -381,8 +432,9 @@ const startNewSessionFlow = async (clientId, user) => {
   const threadId = await ensureClientTopic(clientId, user);
   const sessionId = await db.startSession(clientId);
 
-  await sendToTopicChecked(
-    threadId,
+  await sendToClientTopic(
+    clientId,
+    user,
     `▶️ Сессия басталды. session_id=${sessionId}`,
   );
 
@@ -402,6 +454,7 @@ const startNewSessionFlow = async (clientId, user) => {
     threadId,
     SURVEY_Q_CATEGORY,
     categoryButtons(),
+    user,
   );
 
   await db.setSessionState(clientId, sessionId, "CATEGORY");
@@ -442,6 +495,7 @@ const handlePrivateMessage = async (m) => {
         threadId,
         SURVEY_Q_CATEGORY,
         categoryButtons(),
+        user,
       );
       return;
     }
@@ -457,6 +511,7 @@ const handlePrivateMessage = async (m) => {
       threadId,
       SURVEY_Q_CATEGORY,
       `${choice.emoji} ${choice.label}`,
+      user,
     );
 
     await sendBotToClient(
@@ -497,6 +552,7 @@ const handlePrivateMessage = async (m) => {
       threadId,
       SURVEY_Q_NAME_SHORT,
       name,
+      user,
     );
 
     await sendSurveyQuestionWithOptions(
@@ -505,6 +561,7 @@ const handlePrivateMessage = async (m) => {
       threadId,
       SURVEY_Q_MOOD,
       moodButtons(),
+      user,
     );
 
     await db.setSessionState(clientId, sessionId, "MOOD");
@@ -521,6 +578,7 @@ const handlePrivateMessage = async (m) => {
         threadId,
         SURVEY_Q_MOOD,
         moodButtons(),
+        user,
       );
       return;
     }
@@ -536,6 +594,7 @@ const handlePrivateMessage = async (m) => {
       threadId,
       SURVEY_Q_MOOD,
       `${mood.emoji} ${mood.label}`,
+      user,
     );
 
     const qs = MOOD_QUESTIONS[mood.key] || [];
@@ -543,8 +602,9 @@ const handlePrivateMessage = async (m) => {
     const q2 = qs[1] || "";
     const q3 = qs[2] || "";
 
-    await sendToTopicChecked(
-      threadId,
+    await sendToClientTopic(
+      clientId,
+      user,
       `🧾 3 СҰРАҚ (кезекпен)\n1) ${q1}\n2) ${q2}\n3) ${q3}`,
     );
 
@@ -557,7 +617,6 @@ const handlePrivateMessage = async (m) => {
       true,
       null,
     );
-
     await db.setSessionState(clientId, sessionId, "MOOD_Q1");
     return;
   }
@@ -573,10 +632,16 @@ const handlePrivateMessage = async (m) => {
 
     const step =
       session.state === "MOOD_Q1" ? 1 : session.state === "MOOD_Q2" ? 2 : 3;
-
     const question = qs[step - 1] || "";
 
-    await logSurveyAnswer(clientId, sessionId, threadId, question, answer);
+    await logSurveyAnswer(
+      clientId,
+      sessionId,
+      threadId,
+      question,
+      answer,
+      user,
+    );
 
     if (step === 1)
       await db.updateSession(clientId, sessionId, { mood_q1: answer });
@@ -616,27 +681,12 @@ const handlePrivateMessage = async (m) => {
       null,
     );
 
-    // ✅ ЕДИНСТВЕННЫЙ Excel: ТОЛЬКО ПОСЛЕ ЗАВЕРШЕНИЯ ОПРОСА
-    const startFile = await exportSessionXlsx(clientId, sessionId, "start");
-    if (SEND_EXCEL_TO_TELEGRAM) {
-      const doc = await tg.sendDocument({
-        chat_id: ADMIN_GROUP_ID,
-        message_thread_id: threadId,
-        filePath: startFile,
-        filename: `start_${clientId}_${sessionId}.xlsx`,
-      });
+    const tid = await ensureClientTopic(clientId, user);
+    await sendSurveyExcelToClientTopic(clientId, user, tid, sessionId);
 
-      const got = toInt(doc?.message_thread_id);
-      if (got !== toInt(threadId)) {
-        await tryDelete(ADMIN_GROUP_ID, doc?.message_id);
-        throw new Error(
-          `Document routing failed. want=${threadId} got=${Number.isFinite(got) ? got : "none"}`,
-        );
-      }
-    }
-
-    await sendToTopicChecked(
-      threadId,
+    await sendToClientTopic(
+      clientId,
+      user,
       "ℹ️ Еркін chat басталды. Психологтар осы тақырыпта жазады. /finish — аяқтау.",
     );
 
@@ -648,12 +698,9 @@ const handlePrivateMessage = async (m) => {
 
 const handleGroupMessage = async (m) => {
   if (!m.chat || m.chat.id !== ADMIN_GROUP_ID) return;
-  if (!m.message_thread_id) return;
 
   const threadId = toInt(m.message_thread_id);
-  if (!Number.isFinite(threadId)) return;
-
-  if (isGeneralThread(threadId)) return;
+  if (!Number.isFinite(threadId) || threadId <= 1) return;
 
   if (!isOperator(m.from?.id)) return;
 
@@ -664,7 +711,7 @@ const handleGroupMessage = async (m) => {
   if (!session) {
     const sid = await db.startSession(clientId);
     session = await db.getActiveSession(clientId);
-    await sendToTopicChecked(
+    await sendToThreadStrict(
       threadId,
       `▶️ Авto-сессия басталды. session_id=${sid}`,
     );
@@ -682,8 +729,7 @@ const handleGroupMessage = async (m) => {
       chat_id: clientId,
       text: "Рахмет. Сессия аяқталды.",
     });
-
-    await sendToTopicChecked(threadId, "⛔ Сессия аяқталды.");
+    await sendToThreadStrict(threadId, "⛔ Сессия аяқталды.");
 
     await db.logMessage(clientId, sessionId, {
       role: "operator",
@@ -734,7 +780,7 @@ const main = async () => {
   await db.openIndex();
 
   if (DROP_PENDING_UPDATES) {
-    await tg.deleteWebhook({ drop_pending_updates: true });
+    await tg.deleteWebhook(true);
   }
 
   await tg.getMe();

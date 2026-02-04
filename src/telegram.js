@@ -63,24 +63,99 @@ const callRaw = async (method, params, isMultipart) => {
   throw new Error(`${method}: Telegram API error`);
 };
 
-const sendMessage = async (params) => callRaw("sendMessage", params, false);
+const sendMessage = async ({
+  chat_id,
+  text,
+  reply_markup,
+  message_thread_id,
+  disable_notification,
+}) => {
+  return callRaw(
+    "sendMessage",
+    {
+      chat_id,
+      text,
+      reply_markup,
+      message_thread_id,
+      disable_notification,
+    },
+    false,
+  );
+};
 
-const copyMessage = async (params) => callRaw("copyMessage", params, false);
+const copyMessage = async ({
+  chat_id,
+  from_chat_id,
+  message_id,
+  message_thread_id,
+}) => {
+  return callRaw(
+    "copyMessage",
+    { chat_id, from_chat_id, message_id, message_thread_id },
+    false,
+  );
+};
 
-const forwardMessage = async (params) =>
-  callRaw("forwardMessage", params, false);
+const forwardMessage = async ({
+  chat_id,
+  from_chat_id,
+  message_id,
+  message_thread_id,
+  disable_notification,
+}) => {
+  return callRaw(
+    "forwardMessage",
+    {
+      chat_id,
+      from_chat_id,
+      message_id,
+      message_thread_id,
+      disable_notification,
+    },
+    false,
+  );
+};
 
-const createForumTopic = async (params) =>
-  callRaw("createForumTopic", params, false);
+const deleteMessage = async ({ chat_id, message_id }) => {
+  return callRaw("deleteMessage", { chat_id, message_id }, false);
+};
 
-const sendChatAction = async (params) =>
-  callRaw("sendChatAction", params, false);
+const sendChatAction = async ({ chat_id, action, message_thread_id }) => {
+  return callRaw(
+    "sendChatAction",
+    { chat_id, action, message_thread_id },
+    false,
+  );
+};
 
-const deleteMessage = async (params) => callRaw("deleteMessage", params, false);
+const createForumTopic = async ({
+  chat_id,
+  name,
+  icon_color,
+  icon_custom_emoji_id,
+}) => {
+  const params = { chat_id, name };
+  if (icon_color !== undefined) params.icon_color = icon_color;
+  if (icon_custom_emoji_id !== undefined)
+    params.icon_custom_emoji_id = icon_custom_emoji_id;
+  return callRaw("createForumTopic", params, false);
+};
 
-const getUpdates = async (params) => callRaw("getUpdates", params, false);
+const getUpdates = async ({ offset, timeout, limit, allowed_updates }) => {
+  return callRaw(
+    "getUpdates",
+    { offset, timeout, limit, allowed_updates },
+    false,
+  );
+};
 
-const deleteWebhook = async (params) => callRaw("deleteWebhook", params, false);
+const deleteWebhook = async (drop_pending_updates) => {
+  return callRaw(
+    "deleteWebhook",
+    { drop_pending_updates: !!drop_pending_updates },
+    false,
+  );
+};
 
 const getMe = async () => callRaw("getMe", {}, false);
 
@@ -92,6 +167,7 @@ const sendDocument = async ({
   filePath,
   filename,
   caption,
+  disable_notification,
 }) => {
   const abs = path.resolve(filePath);
   const buf = await fs.readFile(abs);
@@ -103,6 +179,11 @@ const sendDocument = async ({
     form.append("message_thread_id", String(message_thread_id));
   }
   if (caption) form.append("caption", String(caption));
+  if (disable_notification !== undefined)
+    form.append(
+      "disable_notification",
+      disable_notification ? "true" : "false",
+    );
   form.append("document", blob, filename || path.basename(abs));
 
   return callRaw("sendDocument", form, true);
@@ -113,9 +194,9 @@ module.exports = {
   sendMessage,
   copyMessage,
   forwardMessage,
-  createForumTopic,
-  sendChatAction,
   deleteMessage,
+  sendChatAction,
+  createForumTopic,
   getUpdates,
   deleteWebhook,
   getMe,
