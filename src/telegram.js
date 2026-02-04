@@ -63,60 +63,24 @@ const callRaw = async (method, params, isMultipart) => {
   throw new Error(`${method}: Telegram API error`);
 };
 
-const sendMessage = async ({
-  chat_id,
-  text,
-  reply_markup,
-  message_thread_id,
-}) => {
-  return callRaw(
-    "sendMessage",
-    { chat_id, text, reply_markup, message_thread_id },
-    false,
-  );
-};
+const sendMessage = async (params) => callRaw("sendMessage", params, false);
 
-const copyMessage = async ({
-  chat_id,
-  from_chat_id,
-  message_id,
-  message_thread_id,
-}) => {
-  return callRaw(
-    "copyMessage",
-    { chat_id, from_chat_id, message_id, message_thread_id },
-    false,
-  );
-};
+const copyMessage = async (params) => callRaw("copyMessage", params, false);
 
-const createForumTopic = async ({
-  chat_id,
-  name,
-  icon_color,
-  icon_custom_emoji_id,
-}) => {
-  const params = { chat_id, name };
-  if (icon_color !== undefined) params.icon_color = icon_color;
-  if (icon_custom_emoji_id !== undefined)
-    params.icon_custom_emoji_idscustom_emoji_id = icon_custom_emoji_id;
-  return callRaw("createForumTopic", params, false);
-};
+const forwardMessage = async (params) =>
+  callRaw("forwardMessage", params, false);
 
-const getUpdates = async ({ offset, timeout, limit, allowed_updates }) => {
-  return callRaw(
-    "getUpdates",
-    { offset, timeout, limit, allowed_updates },
-    false,
-  );
-};
+const createForumTopic = async (params) =>
+  callRaw("createForumTopic", params, false);
 
-const deleteWebhook = async (drop_pending_updates) => {
-  return callRaw(
-    "deleteWebhook",
-    { drop_pending_updates: !!drop_pending_updates },
-    false,
-  );
-};
+const sendChatAction = async (params) =>
+  callRaw("sendChatAction", params, false);
+
+const deleteMessage = async (params) => callRaw("deleteMessage", params, false);
+
+const getUpdates = async (params) => callRaw("getUpdates", params, false);
+
+const deleteWebhook = async (params) => callRaw("deleteWebhook", params, false);
 
 const getMe = async () => callRaw("getMe", {}, false);
 
@@ -148,7 +112,10 @@ module.exports = {
   callRaw,
   sendMessage,
   copyMessage,
+  forwardMessage,
   createForumTopic,
+  sendChatAction,
+  deleteMessage,
   getUpdates,
   deleteWebhook,
   getMe,

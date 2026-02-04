@@ -52,6 +52,28 @@ const ensureIndex = async (sql) => {
   await db.exec(sql);
 };
 
+const ensureTriggers = async () => {
+  await db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_client_topics_thread_ins
+    BEFORE INSERT ON client_topics
+    FOR EACH ROW
+    WHEN NEW.thread_id IS NULL OR NEW.thread_id <= 1
+    BEGIN
+      SELECT RAISE(ABORT, 'client_topics.thread_id must be > 1');
+    END;
+  `);
+
+  await db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_client_topics_thread_upd
+    BEFORE UPDATE OF thread_id ON client_topics
+    FOR EACH ROW
+    WHEN NEW.thread_id IS NULL OR NEW.thread_id <= 1
+    BEGIN
+      SELECT RAISE(ABORT, 'client_topics.thread_id must be > 1');
+    END;
+  `);
+};
+
 const createBaseTables = async () => {
   await db.exec(`
     PRAGMA journal_mode = WAL;
@@ -129,6 +151,8 @@ const createBaseTables = async () => {
   await ensureIndex(
     `CREATE INDEX IF NOT EXISTS idx_messages_client_session_time ON messages(client_id, session_id, created_at_ms, id)`,
   );
+
+  await ensureTriggers();
 };
 
 const migrate = async () => {
@@ -248,6 +272,12 @@ const migrate = async () => {
   );
   await ensureIndex(
     `CREATE INDEX IF NOT EXISTS idx_messages_client_session_time ON messages(client_id, session_id, created_at_ms, id)`,
+  );
+
+  await ensureTriggers();
+
+  await db.run(
+    `DELETE FROM client_topics WHERE thread_id IS NULL OR thread_id <= 1`,
   );
 };
 
