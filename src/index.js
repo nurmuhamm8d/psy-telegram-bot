@@ -18,7 +18,6 @@ const {
 const tg = require("./telegram");
 const db = require("./db");
 const { exportSessionXlsx } = require("./excel");
-const { scheduleExport } = require("./export");
 
 const isOperator = (id) => OPERATOR_IDS.includes(Number(id));
 
@@ -460,8 +459,6 @@ const handlePrivateMessage = async (m) => {
       `${choice.emoji} ${choice.label}`,
     );
 
-    scheduleExport(clientId, sessionId, threadId, "live");
-
     await sendBotToClient(
       clientId,
       sessionId,
@@ -502,8 +499,6 @@ const handlePrivateMessage = async (m) => {
       name,
     );
 
-    scheduleExport(clientId, sessionId, threadId, "live");
-
     await sendSurveyQuestionWithOptions(
       clientId,
       sessionId,
@@ -542,8 +537,6 @@ const handlePrivateMessage = async (m) => {
       SURVEY_Q_MOOD,
       `${mood.emoji} ${mood.label}`,
     );
-
-    scheduleExport(clientId, sessionId, threadId, "live");
 
     const qs = MOOD_QUESTIONS[mood.key] || [];
     const q1 = qs[0] || "";
@@ -592,8 +585,6 @@ const handlePrivateMessage = async (m) => {
     if (step === 3)
       await db.updateSession(clientId, sessionId, { mood_q3: answer });
 
-    scheduleExport(clientId, sessionId, threadId, "live");
-
     if (step < 3) {
       const nextQ = qs[step] || "";
       await sendBotToClient(
@@ -625,6 +616,7 @@ const handlePrivateMessage = async (m) => {
       null,
     );
 
+    // ✅ ЕДИНСТВЕННЫЙ Excel: ТОЛЬКО ПОСЛЕ ЗАВЕРШЕНИЯ ОПРОСА
     const startFile = await exportSessionXlsx(clientId, sessionId, "start");
     if (SEND_EXCEL_TO_TELEGRAM) {
       const doc = await tg.sendDocument({
@@ -661,6 +653,8 @@ const handleGroupMessage = async (m) => {
   const threadId = toInt(m.message_thread_id);
   if (!Number.isFinite(threadId)) return;
 
+  if (isGeneralThread(threadId)) return;
+
   if (!isOperator(m.from?.id)) return;
 
   const clientId = await db.getClientIdByThread(threadId);
@@ -683,24 +677,6 @@ const handleGroupMessage = async (m) => {
 
   if (cmd === "/finish" || cmd.startsWith("/finish@")) {
     await db.finishSession(clientId, sessionId);
-
-    const endFile = await exportSessionXlsx(clientId, sessionId, "end");
-    if (SEND_EXCEL_TO_TELEGRAM) {
-      const doc = await tg.sendDocument({
-        chat_id: ADMIN_GROUP_ID,
-        message_thread_id: threadId,
-        filePath: endFile,
-        filename: `end_${clientId}_${sessionId}.xlsx`,
-      });
-
-      const got = toInt(doc?.message_thread_id);
-      if (got !== toInt(threadId)) {
-        await tryDelete(ADMIN_GROUP_ID, doc?.message_id);
-        throw new Error(
-          `Document routing failed. want=${threadId} got=${Number.isFinite(got) ? got : "none"}`,
-        );
-      }
-    }
 
     await tg.sendMessage({
       chat_id: clientId,
